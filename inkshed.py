@@ -5,13 +5,17 @@
 A script for inkshedding.
 """
 
+import ConfigParser
+import argparse
+import cPickle
 import datetime
 import os
+import pickle
 import re
 import subprocess
 
 from contextlib import contextmanager
-
+from functools import reduce
 
 BASE_TEMPLATE = """
 % {title}
@@ -21,95 +25,18 @@ BASE_TEMPLATE = """
 {extra_content}
 """.lstrip()
 
-GLOBAL_DIRECTIVES = {
-    'author': 'Eddie Antonio Santos',
+DEFAULTS = {
+    'basedir': os.path.expanduser('~'),
+    'title': '{number} — {subject}',
 }
-
-# Need templates for contexts:
-#  - English:
-#    - Reading reflection
-#    - Idea collection
-# TODO: Make this a declarative file format. YAML, JSON or INI.
-templates = {
-    'engl': {
-        'reading': {
-            # The actual title of the inkshed.
-            'title':        "{number} — {work_title}",
-            # TODO: use alternative format when AugmentedStr is working fine
-            # and dandy.
-            'filename':     "{work_title}-{zeroed_number}", #"{work_title:|title,dashed}-{zeroed_number}",
-            'dir':          'inksheds',
-            'fulldir':      '/Users/eddieantonio/Documents/School/Engl/',
-
-            # Temporary! Make this a callable!
-            'work_title':   'Skim'
-        },
-
-        'idea': {
-            # Herp derp derp
-            'title': "Idea collection: {title}",
-            'dir': '{paper}'
-        },
-
-        'basedir': '{basedir}/Engl'
-    },
-
-    'eas': {
-        'idea': {
-        },
-    },
-
-    'math': {},
-    'ling': {},
-    'relig': {},
-}
-
-
-def default_context():
-    "Returns the fallback context."
-    return ('engl', 'reading')
-
-
-def format_todays_date():
-    """
-    Returns today's date in: "Month day, Year" format.
-    """
-    today = datetime.datetime.now()
-    # Note: '%e' is a POSIX extension.
-    return "{:%B %e, %y}".format(today)
-
-
-def get_context_from_dir():
-    """
-    Automatically gets context based on the current working directory.
-    """
-    # TODO: Haha, I lied, suckah!
-    return default_context()
-
-
-def global_directives():
-    directives = {
-        'date': format_todays_date(),
-        'extra_content': ''
-    }
-
-    directives.update(GLOBAL_DIRECTIVES)
-    return directives
-
-
-def dynamic_directives():
-    # TODO: Figure out from directory regex.
-    number = 0
-    return {
-        'zeroed_number': number,
-        'number': number + 1,
-    }
 
 
 class AugmentedStr(str):
+
     """
     Augments string format by adding the `|` character after the type
-    conversion. This allows string methods to be used to filter the string.
+    conversion. This allows string methods to be used to filter the
+    string.
 
     >>> s = AugmentedStr('Hello World!     ')
     >>> print("{0:>30|strip,lower,dashed} ***".format(s))
@@ -130,7 +57,7 @@ class AugmentedStr(str):
             # Unable to extract any methods :C
             method_names = []
 
-        # Applies the method with the given name and returns an AugmentedString.
+        # Applies the method with the given name and returns an AugmentedStr.
         apply_method = lambda orig, name: AugmentedStr(getattr(orig, name)())
 
         # Apply all of the methods in sequence to the string.
@@ -141,41 +68,91 @@ class AugmentedStr(str):
 
     def dashed(self, sep=None):
         """
-        Returns a 'dashed' copy of the strings; e.g., whitespace replaced with
-        dashes. Good for formatting slugs.
+        Returns a 'dashed' copy of the strings; e.g., whitespace
+        replaced with dashes.
 
         >>> AugmentedStr('Boy howdee!').dashed()
         'Boy-howdee!'
         """
         return '-'.join(self.split())
 
+    def slugify(self, sep='-'):
+        """
+        Like dashed, but also performs some additional normalization,
+        including changing to lowercase.
+
+        >>> s = AugmentedStr("I'm naïve at Iñtërnâtiônàlizætiøn!")
+        >>> print(s.slugify())
+        i-m-naïve-at-iñtërnâtiônàlizætiøn
+        """
+
+        # Splits the string, Unicode aware!
+        splitter = re.compile(r'\W', re.UNICODE)
+
+        # Ensure we have a Unicode string to make sure we don't mangle
+        # those...
+        unistr = self.decode('UTF-8')
+        components = splitter.split(unistr.lower(), re.UNICODE)
+
+        # Join only non-empty components.
+        return sep.join(c for c in components if len(c)).encode('UTF-8')
+
+
+def format_todays_date():
+    """
+    Returns today's date in: "Month day, Year" format.
+    """
+    today = datetime.datetime.now()
+    # Note: '%e' is a POSIX extension.
+    return "{:%B %e, %y}".format(today)
+
+
+def global_directives():
+    directives = {
+        'date': format_todays_date(),
+        'extra_content': ''
+    }
+    return directives
+
+
+def format_context(context):
+    """
+    Returns a copy of the context in which parameter substitution using
+    AugmentedStr has been performed.
+    """
+    # Items that should do NOT need to have parameter substitution.
+    non_directives = {'dir', 'basedir', 'date', 'number', 'zeroed_number'}
+
+    """
+    # Use them augmented strings to do parameter substitution.
+    aug_context = {key: AugmentedStr(value).format(**context)
+            for key, value in context.items()
+            if key not in non_directives}
+    """
+
+    # Convert all of the things to AugmentedStr to do nifty things with them
+    # later...
+    augmented_context = {key: AugmentedStr(val)
+                         for key, val in context.items()}
+
+    formatted_context = {}
+    # Could have done this in a dict comp, but... this gives better error
+    # messages.
+    for key, value in augmented_context.items():
+        if key in non_directives:
+            continue
+        formatted_context[key] = value.format(**augmented_context)
+
+    return formatted_context
 
 
 def format_template(context):
-    cat, subcat = context
+    """"
+    Does parameter substitution for the context and returns the
+    formatted template.
+    """
 
-    non_directives = {'dir', 'fulldir', 'date', 'number', 'zeroed_number'}
-
-    # Prepare the directives from all sources.
-    directives = global_directives()
-    directives.update(dynamic_directives())
-    directives.update(templates[cat][subcat])
-
-    # TODO: Use augmented strings.
-
-    # Do parameter substitution for formatted directives.
-    formatted_directives = {}
-    for name, directive in directives.items():
-        # Skip non-directives
-        if name in non_directives:
-            continue
-
-        formatted_directives[name] = directive.format(**directives)
-
-    # Add all formatted/paramatterized directives to directives.
-    directives.update(formatted_directives)
-
-    return BASE_TEMPLATE.format(**directives)
+    return BASE_TEMPLATE.format(**context)
 
 
 def launch_editor(filename, default_editor='vi'):
@@ -194,40 +171,187 @@ def launch_editor(filename, default_editor='vi'):
 
 
 @contextmanager
-def cd(directory):
+def cd(directory, stay=False):
     """
-    Executes the statement in the given directory.
+    In a with statement, executes the block in the given directory. If
+    `stay` is True, does not change the directory back.
     """
     original_dir = os.getcwd()
     os.chdir(directory)
     yield
-    os.chdir(original_dir)
+
+    if not stay:
+        os.chdir(original_dir)
 
 
-def get_filename_for_context(_unused):
-    # TODO: Finish this:
-    return "/Users/eddieantonio/Documents/School/Engl/inksheds/", "test.md"
+def get_filename_for_context(context):
+    """
+    Returns a tuple of (dir, filename) from the FORMATTED context.
+
+    >>> ctx = {'dir': '/Users/eddieantonio', 'filename': 'Skim-02'}
+    >>> get_filename_for_context(ctx)
+    ('/Users/eddieantonio', 'Skim-02.md')
+    """
+    assert 'dir' in context and 'filename' in context
+    return context['dir'], context['filename'] + '.md'
 
 
 def start_inkshed(context, contents):
     directory, filename = get_filename_for_context(context)
 
     with cd(directory):
+        # TODO: Check if file exists!
         with open(filename, 'w') as markdown:
             markdown.write(contents)
         launch_editor(filename)
 
 
+def default_config_path():
+    "Returns the default configuration path."
+    return os.path.expanduser('~/.inkshed.cfg')
+
+
+def parse_config(category, config_location=None):
+    "Parses the configuration file."
+
+    if not config_location:
+        config_location = default_config_path()
+
+    parser = ConfigParser.ConfigParser()
+
+    # Try reading from the given config.
+    if not os.path.exists(config_location):
+        raise ValueError("Could not read config from '%s': "
+                         ' file does not exist.' % (config_location,))
+
+    parser.read(config_location)
+    # Parse out general settings.
+    initial_config = {}
+    initial_config.update(DEFAULTS)
+    initial_config.update(parser.items('__general__'))
+    initial_config.update(global_directives())
+
+    # Get the category... fail if we get some Falsy value.
+    category = category or initial_config.get('default')
+    if not category:
+        raise ValueError('No category given and no default in config')
+
+    # Don't bother to parser further; the category doesn't exist so we
+    # should just bail.
+    if not parser.has_section(category):
+        ValueError('Configuration (%s) lacks section for '
+                   'category %s' % (config_location, category))
+
+    # Parse the initial category.
+    options = parser.items(category, raw=True)
+    category_additions = parse_category(options, initial_config)
+    initial_config.update(category_additions)
+
+    return initial_config
+
+
+def parse_category(category, initial_config):
+    """
+    >>> cat = {'dir': 'Engl/inksheds', 'subject': 'Skim'}
+    >>> initial = {'basedir': '/Users/eddieantonio/'}
+    >>> d = parse_category(cat, initial)
+    >>> d['dir']
+    '/Users/eddieantonio/Engl/inksheds'
+    """
+
+    assert 'basedir' in initial_config
+
+    # Fill the additions with the category (for now...).
+    additions = {}
+    additions.update(category)
+
+    # Add the relative directory to the category.
+    if 'dir' in additions:
+        basedir = initial_config['basedir']
+        additions['dir'] = os.path.join(basedir, additions['dir'])
+
+    additions['subject'] = additions.get('subject', '__unknown__')
+    # TODO: parse out subject date strings...
+
+    return additions
+
+
+def context_from_current_dir(context):
+    """
+    Adds 'number' and 'zeroed_number' to the context, given the current
+    directory AND subject!
+    """
+    assert 'dir' in context and 'subject' in context
+
+    filename = '.inkshed.pickle'
+    subject = context['subject']
+
+    if not os.path.exists(filename):
+        # Create the initial, empty context.
+        config = {
+            subject: {'number': 0}
+        }
+    else:
+        with open(filename, 'rb') as f:
+            config = cPickle.load(f)
+
+    # Get either the config, or a new config.  Assume `number` will be
+    # incremented in before the return of this function.
+    additions = config.get(subject, {'number': 0})
+    config[subject] = additions
+
+    # Increment the subject.
+    additions['number'] += 1
+
+    # TODO: should writeback occur here?
+    # Write back the config.
+    with open(filename, 'wb') as f:
+        cPickle.dump(config, f)
+
+    # Add relative number -- not to be persisted
+    additions['zeroed_number'] = additions['number'] - 1
+
+    return additions
+
+
+# TODO:
+def parse_args(args=None):
+    pass
+
+
+class TemporaryArgs(object):
+    "DELETE ME!"
+    should_cd = False
+    config_location = None
+    category = 'engl'
+
+
 def main():
     """
-    Main function. Determines context from directory and creates a new file.
+    Main function. Determines context from directory and creates a new
+    file.
     """
-    context = get_context_from_dir()
-    file_contents = format_template(context)
+
+    # Parse all things that need to be parsed.
+    args = TemporaryArgs()
+    context = parse_config(args.category, args.config_location)
 
     # Changes directory and starts the editor with the new file.
-    start_inkshed(context, file_contents)
+    with cd(context['dir'], stay=args.should_cd):
+        context.update(context_from_current_dir(context))
+        context.update(format_context(context))
+        file_contents = format_template(context)
 
+        start_inkshed(context, file_contents)
+
+
+# Synopsis
+#
+#   inkshed [category [subject]] [-c/--cd]
+
+# parse configs -> make context -> parse additonal configs -> parameter sub ->
+# fill template -> launch editor
+#
 
 if __name__ == '__main__':
     exit(main())
