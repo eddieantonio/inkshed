@@ -5,6 +5,9 @@
 A script for inkshedding.
 """
 
+# TODO: Add UsageError exception.
+# TODO: raise UsageError when no subject provided.
+
 import ConfigParser
 import argparse
 import cPickle
@@ -81,18 +84,23 @@ class AugmentedStr(str):
         Like dashed, but also performs some additional normalization,
         including changing to lowercase.
 
-        >>> s = AugmentedStr("I'm naïve at Iñtërnâtiônàlizætiøn!")
+        >>> s = AugmentedStr("I'm naïve at 'Iñtërnâtiônàlizætiøn'!")
         >>> print(s.slugify())
-        i-m-naïve-at-iñtërnâtiônàlizætiøn
+        im-naïve-at-iñtërnâtiônàlizætiøn
         """
 
+        # Extract apostrophes properly
+        normalizer = re.compile(r"(?<=\w)['’](?=\w)", re.UNICODE)
         # Splits the string, Unicode aware!
-        splitter = re.compile(r'\W', re.UNICODE)
+        splitter = re.compile(r"[^\w’']", re.UNICODE)
 
         # Ensure we have a Unicode string to make sure we don't mangle
         # those...
-        unistr = self.decode('UTF-8')
-        components = splitter.split(unistr.lower(), re.UNICODE)
+        unistr = self.decode('UTF-8').lower()
+
+        depostrophed = ''.join(normalizer.split(unistr))
+
+        components = splitter.split(depostrophed, re.UNICODE)
 
         # Join only non-empty components.
         return sep.join(c for c in components if len(c)).encode('UTF-8')
@@ -314,16 +322,28 @@ def context_from_current_dir(context):
     return additions
 
 
-# TODO:
-def parse_args(args=None):
-    pass
+def parse_args():
+    """
+    Parses arguments from sys.argv.
+    """
+    parser = argparse.ArgumentParser(description='Write inksheds')
 
+    # (Optional) Possitional arguments.
+    parser.add_argument('category', nargs='?',
+                        help='Category (see config)')
+    parser.add_argument('subject', nargs='?',
+                        help='Subject of the inkshed')
 
-class TemporaryArgs(object):
-    "DELETE ME!"
-    should_cd = False
-    config_location = None
-    category = 'engl'
+    # Flags.
+    parser.add_argument('-c', '--cd', action='store_true',
+                        default=False, dest='should_cd',
+                        help='Change into the inkshed directory after editing')
+    parser.add_argument('-f', '--config',
+                        dest='config_location', metavar='LOCATION',
+                        help='Specify a configuration other than the default')
+
+    args = parser.parse_args()
+    return args
 
 
 def main():
@@ -333,8 +353,12 @@ def main():
     """
 
     # Parse all things that need to be parsed.
-    args = TemporaryArgs()
+    args = parse_args()
     context = parse_config(args.category, args.config_location)
+
+    # Set the subject from the arguments, if given.
+    if args.subject:
+        context['subject'] = args.subject
 
     # Changes directory and starts the editor with the new file.
     with cd(context['dir'], stay=args.should_cd):
@@ -344,14 +368,6 @@ def main():
 
         start_inkshed(context, file_contents)
 
-
-# Synopsis
-#
-#   inkshed [category [subject]] [-c/--cd]
-
-# parse configs -> make context -> parse additonal configs -> parameter sub ->
-# fill template -> launch editor
-#
 
 if __name__ == '__main__':
     exit(main())
