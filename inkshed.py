@@ -11,7 +11,9 @@ A script for inkshedding.
 import ConfigParser
 import argparse
 import cPickle
+import collections
 import datetime
+import heapq
 import os
 import pickle
 import re
@@ -84,9 +86,9 @@ class AugmentedStr(str):
         Like dashed, but also performs some additional normalization,
         including changing to lowercase.
 
-        >>> s = AugmentedStr("I'm naïve at 'Iñtërnâtiônàlizætiøn'!")
+        >>> s = AugmentedStr("I'm naïve at Iñtërnatiônàlizætiøn!")
         >>> print(s.slugify())
-        im-naïve-at-iñtërnâtiônàlizætiøn
+        im-naïve-at-iñtërnatiônàlizætiøn
         """
 
         # Extract apostrophes properly
@@ -255,6 +257,9 @@ def parse_config(category, config_location=None):
     category_additions = parse_category(options, initial_config)
     initial_config.update(category_additions)
 
+    # Use the category name as the subject if not specified.
+    initial_config['subject'] = initial_config.get('subject', category)
+
     return initial_config
 
 
@@ -269,19 +274,84 @@ def parse_category(category, initial_config):
 
     assert 'basedir' in initial_config
 
-    # Fill the additions with the category (for now...).
-    additions = {}
-    additions.update(category)
+    # Fill the additions with the category.
+    additions = parse_keys(category)
 
+    basedir = initial_config['basedir']
     # Add the relative directory to the category.
     if 'dir' in additions:
-        basedir = initial_config['basedir']
-        additions['dir'] = os.path.join(basedir, additions['dir'])
-
-    additions['subject'] = additions.get('subject', '__unknown__')
-    # TODO: parse out subject date strings...
+        if not additions['dir'].startswith('/'):
+            # It's a relative path. Join it with the basedir.
+            additions['dir'] = os.path.join(basedir, additions['dir'])
+        # Else, it's an absolute path... do nothing.
+    else:
+        # Else it's not given; use the basedir.
+        additions['dir'] = basedir
 
     return additions
+
+
+def parse_keys(category):
+    """
+    Certain keys are "special" and are date prefixed. Grab 'em.
+    Input is key/value pairs.
+    """
+
+    # Keep all "special keys here"
+    special_keys = collections.defaultdict(list)
+    normal_keys = {}
+
+    pat = re.compile(r'\(>?(\d{4}/\d{1,2}/\d{1,2})\)\s+(.*)')
+
+    # TODO: parse out subject date strings...
+    for key, item in category:
+        match = pat.match(key)
+
+        if not match:
+            # It's a normal, boring key.
+            normal_keys[key] = item
+        else:
+            # Otherwise, it's a fun, date-prefixed key!
+            strdate, actual_key = match.groups()
+            special_keys[actual_key].append((strdate, item))
+
+    normal_keys.update(parse_special_keys(special_keys))
+    return normal_keys
+
+
+def parse_special_keys(special_keys):
+    return {key: parse_special_key(items)
+            for key, items in special_keys.items()}
+
+def parse_special_key(association_list):
+    """
+    Returns the appropriate special key for today's date.
+
+    >>> future = ('2034/12/23', 'outasight')
+    >>> past = ('1970/7/14', 'funky')
+    >>> appropriate = ('2014/9/14', 'herp')
+    >>> parse_special_key([future, past, appropriate])
+    'herp'
+    """
+
+    today = datetime.datetime.today()
+    heap = []
+
+    for strdate, value in association_list:
+        date = datetime.datetime.strptime(strdate, '%Y/%m/%d')
+        # All dates in the future are inapplicable.
+        if date > today:
+            continue
+
+        heapq.heappush(heap, (today - date, value))
+
+    # No items were applicable!
+    if not heap:
+        raise ValueError('No valid values in %r' % (association_list,))
+
+    _last_date, value = heap[0]
+    return value
+
 
 
 def context_from_current_dir(context):
